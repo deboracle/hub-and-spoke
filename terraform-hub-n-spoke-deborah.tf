@@ -1,0 +1,314 @@
+# provider configuration
+provider "azurerm" {
+  features {}
+}
+
+# create resource group for the hub
+resource "azurerm_resource_group" "deborah_hub_rg" {
+  name     = "deborah-hub-rg"
+  location = "West US"
+}
+
+# create resource group for the work spoke
+resource "azurerm_resource_group" "deborah_work_spoke_rg" {
+  name     = "deborah-work-spoke-rg"
+  location = "West US"
+}
+
+# create resource group for the monitor spoke
+resource "azurerm_resource_group" "deborah_monitor_spoke_rg" {
+  name     = "deborah-monitor-spoke-rg"
+  location = "West US"
+}
+
+# create the hub virtual network
+resource "azurerm_virtual_network" "deborah_hub_vnet" {
+  name                = "deborah-hub-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+}
+
+# create the hub vpn gagteway
+resource "azurerm_virtual_network_gateway" "deborah_hub_vpn_gateway" {
+  name                = "deborah-hub-vpn-gateway"
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+  type                = "Vpn"
+  vpn_type            = "RouteBased"
+  sku                 = "VpnGw1"
+
+  ip_configuration {
+    name      = "gatewayIpConfig"
+    subnet_id = azurerm_subnet.deborah_hub_gateway_subnet.id
+  }
+}
+
+# create the hub p2s connection
+resource "azurerm_virtual_network_gateway_connection" "deborah_hub_p2s_connection" {
+  name                      = "deborah-hub-p2s-connection"
+  location                  = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name       = azurerm_resource_group.deborah_hub_rg.name
+  virtual_network_gateway1_id = azurerm_virtual_network_gateway.deborah_hub_vpn_gateway.id
+  connection_type           = "IPsec"
+  vpn_client_configuration {
+    address_space = ["192.168.0.0/24"]
+    root_certificate {
+      name = "deborah-p2sRootCert"
+      public_cert_data = "???" # i dont know the certificate
+    }
+  }
+}
+
+# create the hub firewall
+resource "azurerm_firewall" "deborah_hub_firewall" {
+  name                = "deborah-hub-firewall"
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+}
+
+# create the firewall policy
+resource "azurerm_firewall_policy" "deborah_hub_firewall_policy" {
+  name                = "deborah-hub-firewall-policy"
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+}
+
+# create the hub acr with private endpoint
+resource "azurerm_container_registry" "deborah_hub_acr" {
+  name                = "deborah-hub-acr"
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  sku                 = "Standard"
+}
+
+resource "azurerm_private_endpoint" "deborah_hub_acr_private_endpoint" {
+  name                = "deborah-hub-acr-private-endpoint"
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+
+  subnet_id                    = azurerm_subnet.deborah_hub_acr_private_endpoint_subnet.id
+  private_service_connection {
+    name                           = "deborah-acrPrivateEndpoint"
+    private_connection_resource_id = azurerm_container_registry.deborah_hub_acr.id
+    is_manual_connection           = false
+    subresource_names              = ["registry"]
+  }
+}
+
+# create the hub log analytics workspace
+resource "azurerm_log_analytics_workspace" "deborah_hub_log_analytics_workspace" {
+  name                = "deborah-hub-log-analytics-workspace"
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+}
+
+# create the work spoke vnet
+resource "azurerm_virtual_network" "deborah_work_spoke_vnet" {
+  name                = "deborah-work-spoke-vnet"
+  address_space       = ["10.1.0.0/16"]
+  location            = azurerm_resource_group.deborah_work_spoke_rg.location
+  resource_group_name = azurerm_resource_group.deborah_work_spoke_rg.name
+}
+
+# create work spoke subnet
+resource "azurerm_subnet" "deborah_work_spoke_subnet" {
+  name                 = "deborah-work-spoke-subnet"
+  resource_group_name  = azurerm_resource_group.deborah_work_spoke_rg.name
+  virtual_network_name = azurerm_virtual_network.deborah_work_spoke_vnet.name
+  address_prefixes     = ["10.1.0.0/24"]
+}
+
+# create work spoke vm
+resource "azurerm_virtual_machine" "deborah_work_spoke_vm" {
+  name                  = "deborah-work-spoke-vm"
+  location              = azurerm_resource_group.deborah_work_spoke_rg.location
+  resource_group_name   = azurerm_resource_group.deborah_work_spoke_rg.name
+  vm_size               = "Standard_B2s"
+  delete_os_disk_on_termination = true
+  delete_data_disks_on_termination = true
+
+  storage_image_reference {
+    publisher = "Canonical"
+    offer     = "UbuntuServer"
+    sku       = "18.04-LTS"
+    version   = "latest"
+  }
+
+  os_disk {
+    name              = "deborah-osdisk"
+    caching           = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  network_interface {
+    name                      = "deborah-nic"
+    network_security_group_id = azurerm_network_security_group.deborah_work_spoke_nsg.id
+    primary                    = true
+    ip_configuration {
+      name      = "deborah-config"
+      subnet_id = azurerm_subnet.deborah_work_spoke_subnet.id
+    }
+  }
+}
+
+# create the work spoke storage account
+resource "azurerm_storage_account" "deborah_work_spoke_storage_account" {
+  name                     = "deborah-workspokestorage"
+  resource_group_name      = azurerm_resource_group.deborah_work_spoke_rg.name
+  location                 = azurerm_resource_group.deborah_work_spoke_rg.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+}
+
+# create a private endpoint for the storage account
+resource "azurerm_private_endpoint" "deborah_work_spoke_storage_private_endpoint" {
+  name                = "deborah-work-spoke-storage-private-endpoint"
+  location            = azurerm_resource_group.deborah_work_spoke_rg.location
+  resource_group_name = azurerm_resource_group.deborah_work_spoke_rg.name
+
+  subnet_id                    = azurerm_subnet.deborah_work_spoke_subnet.id
+  private_service_connection {
+    name                           = "deborah-storagePrivateEndpoint"
+    private_connection_resource_id = azurerm_storage_account.deborah_work_spoke_storage_account.id
+    is_manual_connection           = false
+    subresource_names              = ["blob"]
+  }
+}
+
+# create vnet for monitor spoke
+resource "azurerm_virtual_network" "deborah_monitor_spoke_vnet" {
+  name                = "deborah-monitor-spoke-vnet"
+  address_space       = ["10.2.0.0/16"]
+  location            = azurerm_resource_group.deborah_monitor_spoke_rg.location
+  resource_group_name = azurerm_resource_group.deborah_monitor_spoke_rg.name
+}
+
+# create subnet for monitor spoke
+resource "azurerm_subnet" "deborah_monitor_spoke_subnet" {
+  name                 = "deborah-monitor-spoke-subnet"
+  resource_group_name  = azurerm_resource_group.deborah_monitor_spoke_rg.name
+  virtual_network_name = azurerm_virtual_network.deborah_monitor_spoke_vnet.name
+  address_prefixes     = ["10.2.0.0/24"]
+}
+
+# peerig hub vnet to work spoke vnet
+resource "azurerm_virtual_network_peering" "deborah_hub_to_work_spoke" {
+  name                         = "deborah-hub-to-work-spoke"
+  resource_group_name          = azurerm_resource_group.deborah_hub_rg.name
+  virtual_network_name         = azurerm_virtual_network.deborah_hub_vnet.name
+  remote_virtual_network_id    = azurerm_virtual_network.deborah_work_spoke_vnet.id
+  allow_virtual_network_access = true
+}
+
+# peering hub vnet to monitor spoke vnet
+resource "azurerm_virtual_network_peering" "deborah_hub_to_monitor_spoke" {
+  name                         = "deborah-hub-to-monitor-spoke"
+  resource_group_name          = azurerm_resource_group.deborah_hub_rg.name
+  virtual_network_name         = azurerm_virtual_network.deborah_hub_vnet.name
+  remote_virtual_network_id    = azurerm_virtual_network.deborah_monitor_spoke_vnet.id
+  allow_virtual_network_access = true
+}
+
+# create network security group for the work spoke vnet
+resource "azurerm_network_security_group" "deborah_work_spoke_nsg" {
+  name                = "deborah-work-spoke-nsg"
+  location            = azurerm_resource_group.deborah_work_spoke_rg.location
+  resource_group_name = azurerm_resource_group.deborah_work_spoke_rg.name
+}
+
+# create network security group for the monitor spoke vnet
+resource "azurerm_network_security_group" "deborah_monitor_spoke_nsg" {
+  name                = "deborah-monitor-spoke-nsg"
+  location            = azurerm_resource_group.deborah_monitor_spoke_rg.location
+  resource_group_name = azurerm_resource_group.deborah_monitor_spoke_rg.name
+}
+
+# add nsg rule to allow traffiv from the vpn gateway to the spokes vnets
+resource "azurerm_network_security_rule" "deborah_vpn_gateway_to_spokes" {
+  name                        = "deborah-vpn-gateway-to-spokes"
+  priority                    = 100
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefixes     = [azurerm_virtual_network_gateway.deborah_hub_vpn_gateway.vpn_client_address_pool]
+  destination_address_prefix  = azurerm_virtual_network.deborah_work_spoke_vnet.address_space[0]
+  resource_group_name         = azurerm_resource_group.deborah_hub_rg.name
+  network_security_group_name = azurerm_network_security_group.deborah_work_spoke_nsg.name
+}
+
+# add nsg rule to allow traffic from the vpn gateeway to the monitor spoke
+resource "azurerm_network_security_rule" "deborah_vpn_gateway_to_monitor_spoke" {
+  name                        = "deborah-vpn-gateway-to-monitor-spoke"
+  priority                    = 100
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefixes     = [azurerm_virtual_network_gateway.deborah_hub_vpn_gateway.vpn_client_address_pool]
+  destination_address_prefix  = azurerm_virtual_network.deborah_monitor_spoke_vnet.address_space[0]
+  resource_group_name         = azurerm_resource_group.deborah_hub_rg.name
+  network_security_group_name = azurerm_network_security_group.deborah_monitor_spoke_nsg.name
+}
+
+# add nsg rule to allow traffic from work spoke vm to the storage storage account
+resource "azurerm_network_security_rule" "deborah_work_spoke_vm_to_storage_account" {
+  name                        = "deborah-work-spoke-vm-to-storage-account"
+  priority                    = 100
+  direction                   = "Outbound"
+  access                      = "Allow"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefixes     = [azurerm_subnet.deborah_work_spoke_subnet.address_prefixes[0]]
+  destination_address_prefix  = azurerm_storage_account.deborah_work_spoke_storage_account.primary_blob_endpoint
+  resource_group_name         = azurerm_resource_group.deborah_work_spoke_rg.name
+  network_security_group_name = azurerm_network_security_group.deborah_work_spoke_nsg.name
+}
+
+# diagnostics settings for resources
+resource "azurerm_monitor_diagnostic_setting" "deborah_hub_monitor_diagnostic_setting" {
+  name               = "deborah-hub-monitor-diagnostic-setting"
+  target_resource_id = azurerm_firewall.deborah_hub_firewall.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.deborah_hub_log_analytics_workspace.id
+  category           = "FirewallDiagnostics"
+  enabled            = true
+}
+
+resource "azurerm_monitor_diagnostic_setting" "deborah_work_spoke_vm_diagnostic_setting" {
+  name               = "deborah-work-spoke-vm-diagnostic-setting"
+  target_resource_id = azurerm_virtual_machine.deborah_work_spoke_vm.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.deborah_hub_log_analytics_workspace.id
+  category           = "AllMetrics"
+  enabled            = true
+}
+
+resource "azurerm_monitor_diagnostic_setting" "deborah_monitor_spoke_vm_diagnostic_setting" {
+  name               = "deborah-monitor-spoke-vm-diagnostic-setting"
+  target_resource_id = azurerm_virtual_machine.deborah_monitor_spoke_vm.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.deborah_hub_log_analytics_workspace.id
+  category           = "AllMetrics"
+  enabled            = true
+}
+
+# log analytics workspace
+resource "azurerm_log_analytics_workspace" "deborah_activity_log_workspace" {
+  name                = "deborah-activity-log-workspace"
+  location            = azurerm_resource_group.deborah_hub_rg.location
+  resource_group_name = azurerm_resource_group.deborah_hub_rg.name
+  sku                 = "PerGB2018"
+}
+
+# diagnostic settings for activity log
+resource "azurerm_monitor_diagnostic_setting" "deborah_activity_log_diagnostic_setting" {
+  name               = "deborah-activity-log-diagnostic-setting"
+  target_resource_id = azurerm_log_analytics_workspace.deborah_activity_log_workspace.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.deborah_hub_log_analytics_workspace.id
+  category           = "ActivityLogs"
+  enabled            = true
+}
